@@ -62,6 +62,30 @@ two-sided data**.
   (roughly a27) and re-verified where possible. If a field name looks wrong on a
   newer release, `census.py --debug` prints the raw keys.
 
+## Layout
+
+| Path | What it does |
+|---|---|
+| `oadrep/schema.py` | **The only module that knows the file formats.** Every assumption is numbered and documented; a release that renames a field changes this file and nothing else. |
+| `oadrep/synth.py` | Generates a synthetic replay collection — messy by default, with a *known* planted signal so analysis code can be checked against ground truth. |
+| `oadrep/compare.py` | Wins-vs-losses trajectory comparison. |
+| `census.py` | Collection inventory (CLI). |
+| `tests/` | End-to-end over synthetic data. `python3 -m unittest discover -s tests` |
+
+Developing without a replay collection to hand:
+
+```bash
+python3 -m oadrep.synth /tmp/fake --games 200 --drift 0.35
+python3 census.py --root /tmp/fake --me Me
+python3 -m oadrep.compare --root /tmp/fake --me Me
+```
+
+Checking the schema assumptions against one real replay:
+
+```bash
+python3 -m oadrep.schema ~/.local/share/0ad/replays/0.27.0/<some-game>/
+```
+
 ## census.py
 
 Inventories a replay collection. Run this before modelling anything — the number
@@ -91,6 +115,33 @@ value`), ready to load into pandas or R.
 
 It is strictly read-only and never writes into the replay directory.
 
+## compare.py — wins vs losses
+
+```bash
+python3 -m oadrep.compare --me "YourName"
+```
+
+Splits each of your statistics into games you won and games you lost, per time
+window, and reports where the two differ. Not a model: at a few hundred games it
+is better powered than anything learned, needs no training split, and its output
+is directly actionable.
+
+Comparison is by **common-language effect size** — the probability that a randomly
+chosen won game exceeds a randomly chosen lost game — computed from the
+Mann-Whitney U statistic, with a bootstrap confidence interval. Rank-based, so it
+needs no normality assumption and a couple of blowouts do not move it.
+
+Results are split into two tables, which matters more than it sounds:
+
+- **Decision statistics** — economy, expansion, production. Things you chose.
+- **Outcome-coupled statistics** — combat results. `enemyUnitsKilled` separates
+  wins from losses almost perfectly, but "you killed more in the games you won" is
+  a restatement of winning, not advice. Reported separately so tautologies do not
+  crowd out the coachable findings.
+
+Dozens of stat/window pairs are tested, so some intervals exclude chance by luck.
+The output is a ranked list of leads, not confirmed findings.
+
 ## Notes on modelling this data
 
 Recorded here because they're easy to get wrong and cost real time:
@@ -112,9 +163,17 @@ Recorded here because they're easy to get wrong and cost real time:
 
 ## Status
 
-Early. `census.py` works and is verified against a synthetic fixture; it has not
-yet been run against a large real collection. Win-probability modelling and the
-per-match visualisation are not built yet.
+Early, and honest about it: **everything here has been developed against synthetic
+data.** The schema was read from the 2024 GitHub source mirror, so field names are
+verified against roughly a27 rather than the current release. Nothing has yet met
+a real replay collection.
+
+That is why all format knowledge sits in `oadrep/schema.py` behind numbered
+assumptions — if a name has changed, one module changes and the analysis on top of
+it does not.
+
+Built: collection census, schema adapter, synthetic generator, wins-vs-losses
+comparison, tests. Not built: win-probability model, per-match visualisation.
 
 Issues and PRs welcome, particularly from anyone with a replay collection to test
 against.
