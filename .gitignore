@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.csv
+!examples/*.csv
+.DS_Store
