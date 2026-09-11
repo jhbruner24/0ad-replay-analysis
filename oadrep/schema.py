@@ -84,16 +84,18 @@ class Game:
     def decided(self) -> bool:
         return self.is_1v1 and sum(p.won is True for p in self.players) == 1
 
-    def perspective(self, name: str) -> tuple[Player, Player] | None:
-        """Return (me, opponent) for a 1v1, or None if `name` isn't in it.
+    def perspective(self, names) -> tuple[Player, Player] | None:
+        """Return (me, opponent) for a 1v1, or None if none of `names` are in it.
 
-        Matches on the rating-stripped nickname, so one player's games are not
-        fragmented across every rating they have ever held.
+        `names` can be a single nick or an iterable of aliases (someone who plays
+        under multiple lobby nicks). Matches on rating-stripped nickname.
         """
         if not self.is_1v1:
             return None
-        wanted, _ = split_rating(name)
-        me = next((p for p in self.players if p.nick == wanted), None)
+        if isinstance(names, str):
+            names = [names]
+        wanted = {split_rating(n)[0] for n in names}
+        me = next((p for p in self.players if p.nick in wanted), None)
         them = next((p for p in self.players if p is not me), None)
         return (me, them) if me and them else None
 

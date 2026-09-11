@@ -48,7 +48,9 @@ def histogram(title, counter, limit=12):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", help="replay directory (auto-detected if omitted)")
-    ap.add_argument("--me", help="your in-game player name, for win/loss and drift")
+    ap.add_argument("--me", help="your primary nick, for win/loss and drift")
+    ap.add_argument("--also", default="", help="comma-separated aliases you also played under")
+    ap.add_argument("--opp", default="", help="comma-separated opponent-nick aliases (one person under many nicks)")
     ap.add_argument("--csv", help="write long-format sequence data here")
     ap.add_argument("--max-minutes", type=float, default=None,
                     help="skip games longer than this (drops left-running games)")
@@ -145,8 +147,17 @@ def main():
         print("\nRe-run with --me \"<name>\" (from the Player names list) "
               "for win/loss and drift.")
     else:
-        mine = [(g, *g.perspective(args.me)) for g in one_v_one
-                if g.perspective(args.me) and g.perspective(args.me)[0]]
+        my_names = [args.me] + [n for n in args.also.split(",") if n]
+        opp_aliases = {n for n in args.opp.split(",") if n}
+        mine = []
+        for g in one_v_one:
+            pair = g.perspective(my_names)
+            if not pair or not pair[0]:
+                continue
+            _, opp = pair
+            if opp_aliases and opp.nick not in opp_aliases:
+                continue
+            mine.append((g, pair[0], pair[1]))
         print(f"\n=== Head-to-head for {args.me}: {len(mine)} games ===")
         if not mine:
             print("  No games matched that name.")

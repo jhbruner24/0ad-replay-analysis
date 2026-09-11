@@ -5,3 +5,4 @@ venv/
 *.csv
 !examples/*.csv
 .DS_Store
+.venv/

@@ -109,7 +109,7 @@ def bootstrap_ci(a, b, rounds=2000, alpha=0.05, seed=0):
     return lo, hi
 
 
-def collect(games, me, buckets=DEFAULT_BUCKETS, min_games=8):
+def collect(games, me, buckets=DEFAULT_BUCKETS, min_games=8, opp_aliases=None):
     """-> {(stat, bucket): {"won": [...], "lost": [...]}} for decided 1v1s."""
     data = defaultdict(lambda: {"won": [], "lost": []})
     used = 0
@@ -119,7 +119,9 @@ def collect(games, me, buckets=DEFAULT_BUCKETS, min_games=8):
         pair = game.perspective(me)
         if not pair:
             continue
-        mine, _ = pair
+        mine, them = pair
+        if opp_aliases and them.nick not in opp_aliases:
+            continue
         if mine.won is None or not mine.times:
             continue
         used += 1
@@ -202,7 +204,8 @@ def report(findings, used, me, limit=15, only_significant=True):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--root", help="replay directory (auto-detected if omitted)")
-    ap.add_argument("--me", required=True, help="your in-game player name")
+    ap.add_argument("--me", required=True, help="your primary nick (comma-separated for aliases)")
+    ap.add_argument("--opp", default="", help="restrict to these opponent nicks (comma-separated)")
     ap.add_argument("--limit", type=int, default=15)
     ap.add_argument("--all", action="store_true", help="include non-significant rows")
     ap.add_argument("--seed", type=int, default=0)
