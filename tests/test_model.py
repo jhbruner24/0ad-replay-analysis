@@ -4,8 +4,11 @@ Uses the synthetic generator for the end-to-end signal-recovery test, so no
 real 0 A.D. data is required. Requires numpy and scikit-learn.
 """
 
+import json
+import math
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,7 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    import numpy  # noqa: F401
+    import numpy as np
     import sklearn  # noqa: F401
     SCI = True
 except ImportError:
@@ -138,6 +141,49 @@ class EndToEndOnSyntheticCollection(unittest.TestCase):
         self.assertEqual(len(ts), len(ps))
         self.assertTrue(all(0 <= p <= 1 for p in ps))
         self.assertIn(label, (0, 1))
+
+    def test_position_only_is_symmetric(self):
+        mirrored = model.position_only(self.samples)
+        self.assertEqual(len(mirrored), 2 * len(self.samples))
+        a, b = mirrored[0], mirrored[1]
+        self.assertEqual(a.label, 1 - b.label)
+        for k, v in a.features.items():
+            if k.startswith("diff."):
+                self.assertEqual(b.features[k], -v)
+        self.assertEqual(a.features["rating_diff"], 0.0)
+        # A fully mirrored fit has nothing to lean on at t=0: P is ~0.5.
+        fit, names = model.train(mirrored)
+        X = np.array([[math.log(1) if n == "t_log" else 0.0 for n in names]])
+        self.assertAlmostEqual(float(fit.predict_proba(X)[0, 1]), 0.5, delta=0.1)
+
+    def test_export_matches_sklearn(self):
+        train, test, _ = model.temporal_split(self.samples, holdout_frac=0.3)
+        fit, names = model.train(train)
+        exp = model.export_json(fit, names)
+        X = np.array([[s.features.get(n, 0.0) for n in names] for s in test[:200]])
+        want = fit.predict_proba(X)[:, 1]
+        for s, w in zip(test[:200], want):
+            self.assertAlmostEqual(model.predict_from_export(exp, s.features), w, places=9)
+
+    def test_js_predictor_matches_python(self):
+        """Run the mod's JS scorer under node against the same export."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        train, test, _ = model.temporal_split(self.samples, holdout_frac=0.3)
+        fit, names = model.train(train)
+        exp = model.export_json(fit, names)
+        cases = [s.features for s in test[:50]]
+        js = os.path.join(os.path.dirname(__file__), "..", "mod", "coach-overlay",
+                          "gui", "session", "coach_overlay.js")
+        script = (open(js, encoding="utf-8").read()
+                  + "\nconst [model, cases] = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
+                  + "\nconsole.log(JSON.stringify(cases.map(f => CoachOverlay_Predict(model, f))));")
+        out = subprocess.run([node, "-e", script], input=json.dumps([exp, cases]),
+                             capture_output=True, text=True, check=True).stdout
+        got = json.loads(out)
+        for f, g in zip(cases, got):
+            self.assertAlmostEqual(g, model.predict_from_export(exp, f), places=9)
 
 
 class PlayerIdMapping(unittest.TestCase):

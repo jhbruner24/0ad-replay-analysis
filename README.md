@@ -208,9 +208,17 @@ Settings → Mod Selection. It writes to
 `saves/campaigns/coach-overlay/live_state.json` under the user data
 directory — GUI-context `Engine.WriteJSONFile` is restricted to a few
 prefixes and `saves/campaigns/` is one of them. `live_coach.py` reads
-that path by default and writes `p_win.json` (fixed 512 bytes — the VFS
-caches file sizes) back into the same directory; the mod reads it every
-5 s and draws "Win NN%" with a bar in the top panel, right of the civ icon.
-Grey means no fresh value in the last 20 s. Full quit + relaunch of 0 A.D.
-is needed after editing the mod: the VFS does not notice changed files on
-macOS.
+that path if you want the number in a terminal too.
+
+The mod scores the game itself: `export_model.py` fits the model on the
+replay collection and writes the coefficients and isotonic calibration to
+`mod/coach-overlay/gui/coach-overlay/model.json`; `coach_overlay.js`
+re-implements the scoring (`oadrep.model.predict_from_export` is the
+reference; a test runs the JS under node and checks parity). The panel
+draws "Win NN%" with a bar in the top panel, right of the civ icon, for
+the viewed player, 1v1 only. Re-export when the collection grows:
+
+    python3 export_model.py --me wace8000 --opp wolfmapking,noob5layer --install
+
+Full quit + relaunch of 0 A.D. is needed after any change to the mod: the
+VFS does not notice changed files on macOS.

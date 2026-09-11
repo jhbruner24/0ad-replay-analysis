@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Read the live_state.json the coach-overlay mod publishes, score it, print.
 
-Pairs with the coach-overlay mod. The mod writes ~/Library/Application Support/
-0ad/saves/campaigns/coach-overlay/live_state.json every N seconds during a live game; this process
-tails the file, extracts features the model was trained on, and prints P(win)
-with a small text bar.
+Terminal companion / debugging aid. The mod scores the game itself in-game
+(export_model.py ships it the fitted numbers); this process independently
+tails the state file, extracts the same features, and prints P(win) with a
+text bar. Useful for checking the in-game number or trying --with-skill.
 
   python3 live_coach.py --me wace8000 --opp wolfmapking,noob5layer
 
@@ -28,15 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from oadrep import model, schema
 
 
-# The mod writes live_state.json here and reads p_win.json back from the same
-# directory to draw the in-game panel.
+# The mod writes live_state.json here.
 MOD_DIR = "saves/campaigns/coach-overlay"
-
-# The engine's VFS records a file's size when it first sees it and reads exactly
-# that many bytes on every subsequent load (lib/file/vfs/vfs.cpp, LoadFile). The
-# mod creates p_win.json at this size and we must overwrite it at this size, or
-# the game reads a truncated/stale document. Keep in sync with coach_overlay.js.
-P_WIN_BYTES = 512
 
 
 def user_data_dir() -> str:
@@ -52,21 +45,6 @@ def user_data_dir() -> str:
 def state_file_path() -> str:
     return f"{user_data_dir()}/{MOD_DIR}/live_state.json"
 
-
-def p_win_path() -> str:
-    return f"{user_data_dir()}/{MOD_DIR}/p_win.json"
-
-
-def write_p_win(path: str, payload: dict) -> None:
-    """Overwrite p_win.json at exactly P_WIN_BYTES (space-padded), atomically."""
-    body = json.dumps(payload, separators=(",", ":"))
-    if len(body) > P_WIN_BYTES:
-        raise ValueError(f"p_win payload {len(body)}B exceeds {P_WIN_BYTES}B")
-    body = body + " " * (P_WIN_BYTES - len(body))
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="ascii") as fh:
-        fh.write(body)
-    os.replace(tmp, path)
 
 
 def _flatten_sequences(raw):
@@ -214,8 +192,6 @@ def main():
           flush=True)
 
     state_path = args.state_file or state_file_path()
-    out_path = (os.path.join(os.path.dirname(args.state_file), "p_win.json")
-                if args.state_file else p_win_path())
     print(f"\nWatching {state_path}\n(Start a game; hit ^C to stop.)\n", flush=True)
 
     import numpy as np
@@ -256,12 +232,6 @@ def main():
         term_w = shutil.get_terminal_size(fallback=(80, 20)).columns
         line = f"t={t/60:>5.1f}min  P(win)={p:>5.1%}  {_bar(p, min(50, term_w-30))}"
         print("\r" + line, end="\n", flush=True)
-        try:
-            write_p_win(out_path, {"schema": 1, "p": round(p, 4),
-                                   "t_seconds": t, "tick": state.get("tick"),
-                                   "written_at_ms": int(time.time() * 1000)})
-        except OSError as e:
-            print(f"  (could not write {out_path}: {e})", flush=True)
 
 
 if __name__ == "__main__":

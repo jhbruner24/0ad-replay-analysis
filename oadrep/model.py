@@ -28,6 +28,7 @@ Design choices, all driven by the data (see 0ad-replay-coach/README.md for why):
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 
@@ -273,6 +274,55 @@ class _StandardisedModel:
 
     def predict_proba(self, X):
         return self.inner.predict_proba((X - self.mu) / self.sd)
+
+
+def export_json(fit, names):
+    """Serialise a trained model so something without sklearn can score it.
+
+    Consumed by the coach-overlay mod's JS (gui/session/coach_overlay.js),
+    which must produce the same number sklearn does. The calibrated model is
+    an average over `cv` members, each a logistic regression followed by an
+    isotonic map applied to its decision function (linear interpolation
+    between thresholds, clipped at the ends). `predict_from_export` below is
+    the reference implementation; the JS mirrors it line for line.
+    """
+    members = []
+    for cc in fit.inner.calibrated_classifiers_:
+        lr = cc.estimator
+        iso = cc.calibrators[0]
+        members.append({
+            "coef": [float(c) for c in lr.coef_[0]],
+            "intercept": float(lr.intercept_[0]),
+            "iso_x": [float(x) for x in iso.X_thresholds_],
+            "iso_y": [float(y) for y in iso.y_thresholds_],
+        })
+    return {
+        "schema": 1,
+        "names": list(names),
+        "mu": [float(v) for v in fit.mu],
+        "sd": [float(v) for v in fit.sd],
+        "members": members,
+    }
+
+
+def predict_from_export(exp, feats):
+    """Pure-Python scoring of an `export_json` dict. Reference for the JS."""
+    z = [(feats.get(n, 0.0) - mu) / sd
+         for n, mu, sd in zip(exp["names"], exp["mu"], exp["sd"])]
+    total = 0.0
+    for m in exp["members"]:
+        d = m["intercept"] + sum(c * v for c, v in zip(m["coef"], z))
+        xs, ys = m["iso_x"], m["iso_y"]
+        if d <= xs[0]:
+            p = ys[0]
+        elif d >= xs[-1]:
+            p = ys[-1]
+        else:
+            i = bisect.bisect_right(xs, d) - 1
+            x0, x1, y0, y1 = xs[i], xs[i + 1], ys[i], ys[i + 1]
+            p = y0 if x1 == x0 else y0 + (y1 - y0) * (d - x0) / (x1 - x0)
+        total += p
+    return total / len(exp["members"])
 
 
 def evaluate(model, samples, names):
