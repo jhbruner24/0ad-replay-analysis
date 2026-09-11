@@ -10,6 +10,9 @@ collection:
 
   A1  A replay is a directory containing commands.txt, usually beside metadata.json.
   A2  commands.txt line 1 is `start <json>`, carrying engine_version and settings.
+      Map name is settings.mapName. Some replays lack engine_version entirely, so
+      it falls back to the parent directory, which the engine names by version
+      (VisualReplay.cpp: replays/<engine_version>/<game>/).
   A3  metadata.json has keys timeElapsed (ms), playerStates, mapSettings.
   A4  playerStates[0] is Gaia; real players start at index 1.
   A5  Each player has name, civ, state ("won"/"defeated"/"active").
@@ -17,6 +20,8 @@ collection:
       with resource-typed stats nested one level: {"food": [...], "wood": [...]}.
   A7  sequences["time"] is in SECONDS; timeElapsed is in MILLISECONDS.
   A8  Replay directories are named "<unixtime>_<n>", giving chronological order.
+  A9  Lobby games append the rating to the nickname as "nick (1234)". The regex
+      matches the engine's own splitRatingFromNick (gamedescription.js).
 
 Run `python3 -m oadrep.schema <replay-dir>` to check these against a real game.
 """
@@ -30,10 +35,22 @@ from dataclasses import dataclass, field
 
 WON, DEFEATED = "won", "defeated"
 
+# A9: the engine's own pattern, copied from gui/common/gamedescription.js so that
+# nicknames split exactly the way the game splits them.
+NICK_RATING = re.compile(r"^(\S+) \((\d+)\)$")
+
+
+def split_rating(player_name: str):
+    """"Alec576 (1323)" -> ("Alec576", 1323). Unrated names pass through."""
+    m = NICK_RATING.match(player_name or "")
+    return (m.group(1), int(m.group(2))) if m else (player_name, None)
+
 
 @dataclass
 class Player:
-    name: str
+    name: str                # exactly as recorded, e.g. "Alec576 (1323)"
+    nick: str                # rating stripped, e.g. "Alec576"
+    rating: int | None       # lobby ELO at the time of the game, if rated
     civ: str
     state: str
     sequences: dict          # flattened: {"resourcesGathered.food": [...], ...}
@@ -68,10 +85,15 @@ class Game:
         return self.is_1v1 and sum(p.won is True for p in self.players) == 1
 
     def perspective(self, name: str) -> tuple[Player, Player] | None:
-        """Return (me, opponent) for a 1v1, or None if `name` isn't in it."""
+        """Return (me, opponent) for a 1v1, or None if `name` isn't in it.
+
+        Matches on the rating-stripped nickname, so one player's games are not
+        fragmented across every rating they have ever held.
+        """
         if not self.is_1v1:
             return None
-        me = next((p for p in self.players if p.name == name), None)
+        wanted, _ = split_rating(name)
+        me = next((p for p in self.players if p.nick == wanted), None)
         them = next((p for p in self.players if p is not me), None)
         return (me, them) if me and them else None
 
@@ -122,6 +144,12 @@ def _start_attribs(commands_path):
         return None
 
 
+def _version_from_path(directory) -> str:
+    """A2 fallback. Replays live in replays/<engine_version>/<game>/."""
+    parent = os.path.basename(os.path.dirname(directory))
+    return parent if re.match(r"^\d+\.\d+(\.\d+)?$", parent) else "unknown"
+
+
 def _order_of(directory) -> int:
     m = re.match(r"(\d+)", os.path.basename(directory))       # A8
     if m:
@@ -143,9 +171,18 @@ def load_game(directory: str) -> Game:
     if attribs is None:
         problems.append("no usable start line in commands.txt")
 
-    engine = (attribs or {}).get("engine_version", "unknown")
     settings = (attribs or {}).get("settings") or {}
-    map_name = settings.get("Name") or (meta or {}).get("mapSettings", {}).get("Name") or "unknown"
+
+    # A2: prefer the recorded version; fall back to the directory the engine
+    # filed the replay under, which is named for the version that wrote it.
+    engine = (attribs or {}).get("engine_version") or _version_from_path(directory)
+
+    # A2: the field is settings.mapName. Random maps carry a generated name, so
+    # mapType is a usable fallback when mapName is blank.
+    map_name = (settings.get("mapName")
+                or (meta or {}).get("mapSettings", {}).get("mapName")
+                or (attribs or {}).get("mapType")
+                or "unknown")
 
     duration = None
     elapsed = (meta or {}).get("timeElapsed")
@@ -162,8 +199,12 @@ def load_game(directory: str) -> Game:
             times = seqs.get("time") if isinstance(seqs, dict) else None
             if not isinstance(times, list):
                 times = []
+            raw_name = str(entry.get("name", "?"))
+            nick, rating = split_rating(raw_name)
             players.append(Player(
-                name=str(entry.get("name", "?")),
+                name=raw_name,
+                nick=nick,
+                rating=rating,
                 civ=str(entry.get("civ", "?")),
                 state=str(entry.get("state", "unknown")),     # A5
                 sequences=flatten_sequences(seqs),
@@ -219,7 +260,8 @@ def check(directory: str) -> int:
           if game.duration_minutes is not None else "A7 length : MISSING")
     print(f"A4 players: {len(game.players)}")
     for p in game.players:
-        print(f"   - {p.name:<16} civ={p.civ:<12} state={p.state:<10} "
+        rating = f"rating={p.rating}" if p.rating is not None else "unrated"
+        print(f"   - {p.nick:<16} {rating:<12} civ={p.civ:<12} state={p.state:<10} "
               f"snapshots={len(p.times):<4} stats={len(p.sequences)}")
         if p.times:
             step = p.times[1] - p.times[0] if len(p.times) > 1 else float("nan")

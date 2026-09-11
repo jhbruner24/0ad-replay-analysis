@@ -22,10 +22,15 @@ import csv
 import os
 import statistics
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from oadrep import schema
+
+
+# A game longer than this is almost certainly one left running rather than played.
+OUTLIER_SNAPSHOTS = 240        # 2 hours of game time at one snapshot per 30s
+OUTLIER_MINUTES = 120
 
 
 def histogram(title, counter, limit=12):
@@ -45,6 +50,8 @@ def main():
     ap.add_argument("--root", help="replay directory (auto-detected if omitted)")
     ap.add_argument("--me", help="your in-game player name, for win/loss and drift")
     ap.add_argument("--csv", help="write long-format sequence data here")
+    ap.add_argument("--max-minutes", type=float, default=None,
+                    help="skip games longer than this (drops left-running games)")
     ap.add_argument("--blocks", type=int, default=5, help="chronological blocks for drift")
     ap.add_argument("--debug", action="store_true", help="dump schema details of the first game")
     args = ap.parse_args()
@@ -72,26 +79,42 @@ def main():
         schema.check(usable[0].directory)
 
     versions, sizes, maps, matchups, names = Counter(), Counter(), Counter(), Counter(), Counter()
-    durations, seq_lens, one_v_one = [], [], []
+    ratings = defaultdict(list)
+    durations, seq_lens, one_v_one, outliers = [], [], [], []
 
     for g in usable:
         sizes[len(g.players)] += 1
         versions[g.engine_version] += 1
         maps[g.map_name] += 1
         for p in g.players:
-            names[p.name] += 1
+            names[p.nick] += 1
+            if p.rating is not None:
+                ratings[p.nick].append(p.rating)
         if g.duration_minutes is not None:
             durations.append(g.duration_minutes)
         if g.is_1v1:
             one_v_one.append(g)
             matchups[" vs ".join(sorted(p.civ for p in g.players))] += 1
             seq_lens.extend(len(p.times) for p in g.players if p.times)
+            longest = max((len(p.times) for p in g.players), default=0)
+            if longest > OUTLIER_SNAPSHOTS or (g.duration_minutes or 0) > OUTLIER_MINUTES:
+                outliers.append((g, longest))
 
     print(f"\n1v1 games (2 players):       {len(one_v_one)}")
     print(f"  of which decided:          {sum(g.decided for g in one_v_one)}")
     histogram("Players per game", sizes)
     histogram("Engine versions", versions)
-    histogram("Player names", names)
+    histogram("Player nicks (lobby rating stripped)", names)
+
+    if ratings:
+        rated = {nick: vals for nick, vals in ratings.items() if vals}
+        print(f"\nLobby ratings seen for {len(rated)} nicks "
+              f"(a rating is a skill measure, and a strong candidate feature)")
+        for nick, _ in names.most_common(6):
+            vals = rated.get(nick)
+            if vals:
+                print(f"  {nick:<20} {min(vals)}-{max(vals)}  "
+                      f"(median {statistics.median(vals):.0f}, {len(vals)} rated games)")
     histogram("Civ matchups", matchups)
     histogram("Maps", maps)
 
@@ -101,6 +124,14 @@ def main():
         print(f"  median {statistics.median(durations):.1f}   "
               f"p10 {durations[len(durations)//10]:.1f}   "
               f"p90 {durations[-max(1, len(durations)//10)]:.1f}")
+    if outliers:
+        print(f"\nWARNING: {len(outliers)} game(s) longer than {OUTLIER_MINUTES} minutes.")
+        print("  Almost certainly games left running rather than played. They bloat")
+        print("  exports and distort time buckets. Filter with --max-minutes.")
+        for g, longest in sorted(outliers, key=lambda x: -x[1])[:3]:
+            mins = (g.duration_minutes or longest * 0.5)
+            print(f"  - {os.path.basename(g.directory)}: {mins:,.0f} min, {longest} snapshots")
+
     if seq_lens:
         print(f"\nSequence snapshots per player: median {statistics.median(seq_lens):.0f}, "
               f"min {min(seq_lens)}, max {max(seq_lens)}")
@@ -145,21 +176,29 @@ def main():
                 print("  Trending -> weight recent games; split temporally, never randomly.")
 
     if args.csv:
+        exported = [g for g in one_v_one
+                    if args.max_minutes is None
+                    or (g.duration_minutes or 0) <= args.max_minutes]
+        skipped = len(one_v_one) - len(exported)
         rows = 0
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["game", "order", "player", "civ", "state",
-                        "t_seconds", "stat", "value"])
-            for g in one_v_one:
+            w.writerow(["game", "order", "version", "player", "nick", "rating",
+                        "civ", "state", "t_seconds", "stat", "value"])
+            for g in exported:
                 gid = os.path.basename(g.directory)
                 for p in g.players:
                     for stat, series in p.sequences.items():
                         for t, v in zip(p.times, series):
                             if isinstance(v, (int, float)):
-                                w.writerow([gid, g.order, p.name, p.civ, p.state,
-                                            t, stat, v])
+                                w.writerow([gid, g.order, g.engine_version, p.name,
+                                            p.nick, p.rating if p.rating is not None else "",
+                                            p.civ, p.state, t, stat, v])
                                 rows += 1
-        print(f"\nWrote {rows} rows to {args.csv}")
+        size_mb = os.path.getsize(args.csv) / 1e6
+        print(f"\nWrote {rows:,} rows ({size_mb:,.0f} MB) to {args.csv}")
+        if skipped:
+            print(f"  Skipped {skipped} game(s) over --max-minutes {args.max_minutes}.")
 
 
 if __name__ == "__main__":

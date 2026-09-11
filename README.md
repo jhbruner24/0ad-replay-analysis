@@ -58,9 +58,19 @@ two-sided data**.
 - **Unfinished games write no `metadata.json` at all.** It's saved from
   `CGame::~CGame()`, gated on the game having started, so a crash or a hard quit
   leaves the directory without it.
+- **Lobby games append the rating to the nickname**, as `Alec576 (1323)`. The same
+  person therefore appears under a different name at every rating they have held.
+  Split with the engine's own pattern (`gui/common/gamedescription.js`), which
+  this package copies verbatim. The rating is worth keeping: it is a direct skill
+  measure and a strong candidate feature.
+- The map name is `settings.mapName` on the `start` line, not in `metadata.json`.
+- Some replays carry **no `engine_version`** in the start line. The parent
+  directory is named for the version that wrote it, so it serves as a fallback.
+- Collections contain **games left running** rather than played — hours long, with
+  hundreds of snapshots. They distort time buckets and bloat exports; filter them.
 - Findings above were read from the engine source as of the 2024 GitHub mirror
-  (roughly a27) and re-verified where possible. If a field name looks wrong on a
-  newer release, `census.py --debug` prints the raw keys.
+  (roughly a27). If a field name looks wrong on a newer release,
+  `python3 -m oadrep.schema <replay-dir>` checks each assumption individually.
 
 ## Layout
 
@@ -172,8 +182,13 @@ That is why all format knowledge sits in `oadrep/schema.py` behind numbered
 assumptions — if a name has changed, one module changes and the analysis on top of
 it does not.
 
+**Update:** first contact with a real ~1,800-replay collection corrected three
+schema assumptions (map field, version fallback, nickname ratings). All three were
+one-module fixes, which was the point of the structure. The synthetic generator
+now reproduces those quirks so the tests cover them.
+
 Built: collection census, schema adapter, synthetic generator, wins-vs-losses
-comparison, tests. Not built: win-probability model, per-match visualisation.
+comparison, 22 tests. Not built: win-probability model, per-match visualisation.
 
 Issues and PRs welcome, particularly from anyone with a replay collection to test
 against.

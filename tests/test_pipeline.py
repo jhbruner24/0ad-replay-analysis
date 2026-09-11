@@ -62,8 +62,8 @@ class SyntheticCollection(unittest.TestCase):
     def test_perspective_returns_both_sides(self):
         game = next(g for g in self.games if g.is_1v1)
         me, them = game.perspective("Me")
-        self.assertEqual(me.name, "Me")
-        self.assertNotEqual(them.name, "Me")
+        self.assertEqual(me.nick, "Me")          # nick, not name: names carry ratings
+        self.assertNotEqual(them.nick, "Me")
         self.assertIsNone(game.perspective("Nobody"))
 
 
@@ -131,3 +131,54 @@ class EffectSizeMath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealWorldParsing(unittest.TestCase):
+    """Regressions for things only a real collection revealed."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix="oadrep-real-")
+        synth.generate(cls.root, games=60, me="jace",
+                       opponents=("Alec576", "Doovid", "wace8000"),
+                       rated=0.7, missing_version=0.4, left_running=0.1,
+                       versions=("0.27.0",), seed=11)
+        cls.games = list(schema.iter_games(cls.root))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def test_rating_is_split_from_nickname(self):
+        rated = [p for g in self.games for p in g.players if p.rating is not None]
+        self.assertTrue(rated, "no rated players generated")
+        for p in rated:
+            self.assertNotIn("(", p.nick)
+            self.assertIsInstance(p.rating, int)
+
+    def test_one_player_is_not_fragmented_across_ratings(self):
+        nicks = {p.nick for g in self.games for p in g.players}
+        self.assertEqual(nicks, {"jace", "Alec576", "Doovid", "wace8000"})
+
+    def test_perspective_matches_across_rating_variants(self):
+        matched = [g for g in self.games if g.is_1v1 and g.perspective("jace")]
+        one_v_ones = [g for g in self.games if g.is_1v1]
+        self.assertEqual(len(matched), len(one_v_ones),
+                         "rating suffixes are fragmenting the player's own games")
+
+    def test_map_name_comes_from_settings_mapname(self):
+        for game in self.games:
+            if game.players:
+                self.assertIn(game.map_name, {"Mainland", "Arcadia", "Corsica"})
+
+    def test_version_falls_back_to_directory_when_absent(self):
+        for game in self.games:
+            if game.players:
+                self.assertEqual(game.engine_version, "0.27.0")
+
+    def test_engine_regex_matches_the_games_own_behaviour(self):
+        self.assertEqual(schema.split_rating("Alec576 (1323)"), ("Alec576", 1323))
+        self.assertEqual(schema.split_rating("jace"), ("jace", None))
+        # \S+ forbids whitespace in the nick, exactly as gamedescription.js does
+        self.assertEqual(schema.split_rating("two words (12)"), ("two words (12)", None))
+        self.assertEqual(schema.split_rating("jace ()"), ("jace ()", None))

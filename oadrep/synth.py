@@ -94,29 +94,50 @@ def _player(name, civ, won, snapshots, rng):
     }
 
 
-def generate(root, games=200, me="Me", opponent="Friend", base_win_rate=0.35,
+def generate(root, games=200, me="Me", opponents=("Friend",), base_win_rate=0.35,
              drift=0.0, missing_metadata=0.04, team_games=0.02,
-             unresolved=0.03, versions=("0.27.0",), seed=1):
-    """Write `games` synthetic replays under `root`. Returns the manifest."""
+             unresolved=0.03, versions=("0.27.0",), rated=0.6,
+             missing_version=0.25, left_running=0.005, seed=1):
+    """Write `games` synthetic replays under `root`. Returns the manifest.
+
+    Defaults mirror the messiness of a real collection: lobby ratings appended to
+    nicknames, some replays with no engine_version in the start line, and the
+    occasional game left running for hours.
+    """
     rng = random.Random(seed)
     os.makedirs(root, exist_ok=True)
     manifest = []
+    if isinstance(opponents, str):
+        opponents = (opponents,)
+    # A stable "true skill" per opponent, so rating carries real signal.
+    skill = {name: rng.uniform(-0.25, 0.25) for name in opponents}
 
     for i in range(games):
         # Win rate walks from base_win_rate to base_win_rate+drift across the
         # collection, so drift-detection code has something real to find.
         progress = i / max(games - 1, 1)
-        p_win = min(max(base_win_rate + drift * progress, 0.02), 0.98)
+        opponent = rng.choice(opponents)
+        p_win = min(max(base_win_rate + drift * progress - skill[opponent], 0.02), 0.98)
         i_won = rng.random() < p_win
+
+        # A9: lobby games carry "nick (rating)"; ratings track the skill above.
+        if rng.random() < rated:
+            my_name = f"{me} ({rng.randint(1150, 1450)})"
+            their_name = f"{opponent} ({int(1300 + skill[opponent] * 600 + rng.randint(-40, 40))})"
+        else:
+            my_name, their_name = me, opponent
 
         version = versions[min(int(progress * len(versions)), len(versions) - 1)]
         directory = os.path.join(root, version, f"{1700000000 + i * 7200}_{i:04d}")
         os.makedirs(directory, exist_ok=True)
 
         snapshots = rng.randint(14, 60)          # 7 to 30 minutes at 30s steps
+        if rng.random() < left_running:          # game left running, not played
+            snapshots = rng.randint(400, 1800)
         players = [
-            _player(me, "athen", i_won, snapshots, rng),
-            _player(opponent, "spart", not i_won, snapshots, rng),
+            _player(my_name, "athen", i_won, snapshots, rng),
+            _player(their_name, rng.choice(["spart", "cart", "ptol"]),
+                    not i_won, snapshots, rng),
         ]
         if rng.random() < team_games:            # occasional non-1v1
             players.append(_player("Ally", "brit", i_won, snapshots, rng))
@@ -124,12 +145,17 @@ def generate(root, games=200, me="Me", opponent="Friend", base_win_rate=0.35,
             for p in players:
                 p["state"] = "active"
 
+        # A2: the real field is settings.mapName, and older replays can omit
+        # engine_version entirely - the directory name is then the only source.
+        attribs = {
+            "settings": {"mapName": rng.choice(["Mainland", "Arcadia", "Corsica"])},
+            "mapType": "random",
+            "mods": [],
+        }
+        if rng.random() >= missing_version:
+            attribs["engine_version"] = version
         with open(os.path.join(directory, "commands.txt"), "w", encoding="utf-8") as fh:
-            fh.write("start " + json.dumps({
-                "engine_version": version,
-                "settings": {"Name": rng.choice(["Mainland", "Arcadia", "Corsica"])},
-                "mods": [],
-            }) + "\n")
+            fh.write("start " + json.dumps(attribs) + "\n")
             for turn in range(snapshots * 60):   # 30s of 500ms turns per snapshot
                 fh.write(f"turn {turn} 500\nend\n")
 
@@ -146,6 +172,7 @@ def generate(root, games=200, me="Me", opponent="Friend", base_win_rate=0.35,
         manifest.append({
             "directory": directory, "i_won": i_won, "players": len(players),
             "has_metadata": wrote_meta, "version": version, "snapshots": snapshots,
+            "opponent": opponent,
         })
 
     return manifest
@@ -156,7 +183,8 @@ def main():
     ap.add_argument("root")
     ap.add_argument("--games", type=int, default=200)
     ap.add_argument("--me", default="Me")
-    ap.add_argument("--opponent", default="Friend")
+    ap.add_argument("--opponents", default="Friend",
+                    help="comma-separated opponent nicks")
     ap.add_argument("--win-rate", type=float, default=0.35, help="starting win rate")
     ap.add_argument("--drift", type=float, default=0.0,
                     help="how much the win rate moves across the collection")
@@ -165,13 +193,15 @@ def main():
     args = ap.parse_args()
 
     manifest = generate(
-        args.root, games=args.games, me=args.me, opponent=args.opponent,
+        args.root, games=args.games, me=args.me,
+        opponents=tuple(args.opponents.split(",")),
         base_win_rate=args.win_rate, drift=args.drift,
         versions=tuple(args.versions.split(",")), seed=args.seed,
     )
     wins = sum(m["i_won"] for m in manifest)
     print(f"Wrote {len(manifest)} replays to {args.root}")
     print(f"  {args.me} won {wins} ({wins/len(manifest):.1%})")
+    print(f"  opponents: {len(set(m['opponent'] for m in manifest))}")
     print(f"  missing metadata: {sum(not m['has_metadata'] for m in manifest)}")
     print(f"  non-1v1:          {sum(m['players'] != 2 for m in manifest)}")
     print(f"\nPlanted signal: winners gather food ~{SIGNAL_STRENGTH:.0%} faster "
