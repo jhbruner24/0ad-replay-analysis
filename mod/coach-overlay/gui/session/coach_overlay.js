@@ -10,6 +10,13 @@ var g_CoachOverlay_IntervalMs = 5000;
 // GUI-context WriteJSONFile is path-restricted; saves/campaigns/ is one of the
 // writable prefixes (CampaignRun.js uses it). Real path: <userdata>/saves/campaigns/coach-overlay/
 var g_CoachOverlay_OutPath = "saves/campaigns/coach-overlay/live_state.json";
+// Written back by live_coach.py. Must always be exactly this many bytes: the
+// engine's VFS caches a file's size on first sight and reads that many bytes
+// on every later load (lib/file/vfs/vfs.cpp). We create it at this size here;
+// the Python side overwrites it space-padded to the same size.
+var g_CoachOverlay_InPath = "saves/campaigns/coach-overlay/p_win.json";
+var g_CoachOverlay_InBytes = 512;
+var g_CoachOverlay_StaleMs = 20000;
 var g_CoachOverlay_Started = false;
 var g_CoachOverlay_TickCount = 0;
 
@@ -43,18 +50,70 @@ function CoachOverlay_Publish() {
 	}
 }
 
+/**
+ * Create p_win.json at its fixed size so the VFS registers the right length.
+ * Also wipes any value left over from a previous game.
+ */
+function CoachOverlay_InitInbox() {
+	try {
+		var base = { "schema": 1, "p": null, "pad": "" };
+		var len = JSON.stringify(base).length;
+		base.pad = " ".repeat(g_CoachOverlay_InBytes - len);
+		Engine.WriteJSONFile(g_CoachOverlay_InPath, base);
+	} catch (e) {
+		warn("[coach-overlay] inbox init failed: " + e);
+	}
+}
+
+function CoachOverlay_Draw(text, p, stale) {
+	var textObj = Engine.GetGUIObjectByName("coachWinProbText");
+	var bar = Engine.GetGUIObjectByName("coachWinProbBar");
+	var bg = Engine.GetGUIObjectByName("coachWinProbBarBg");
+	if (!textObj || !bar || !bg) return;
+	textObj.caption = text;
+	textObj.textcolor = stale ? "160 160 160" : "white";
+	if (p === null) {
+		bar.hidden = true;
+		return;
+	}
+	bar.hidden = false;
+	var width = bg.size.right - bg.size.left - 2;
+	var size = bar.size;
+	size.right = size.left + Math.max(1, Math.round(width * p));
+	bar.size = size;
+	// green when ahead, red when behind, grey when stale
+	bar.sprite = stale ? "color: 140 140 140 200"
+		: p >= 0.5 ? "color: 90 200 90 230" : "color: 220 80 80 230";
+}
+
+function CoachOverlay_ReadBack() {
+	try {
+		var d = Engine.ReadJSONFile(g_CoachOverlay_InPath);
+		if (!d || typeof d.p !== "number") {
+			CoachOverlay_Draw("coach: waiting for live_coach.py", null, true);
+			return;
+		}
+		var stale = !d.written_at_ms || (Date.now() - d.written_at_ms) > g_CoachOverlay_StaleMs;
+		CoachOverlay_Draw("Win " + Math.round(d.p * 100) + "%" + (stale ? " (stale)" : ""), d.p, stale);
+	} catch (e) {
+		warn("[coach-overlay] readback failed: " + e);
+	}
+}
+
 function CoachOverlay_Loop() {
 	if (!CoachOverlay_IsReady()) {
 		setTimeout(CoachOverlay_Loop, 1000);
 		return;
 	}
 	CoachOverlay_Publish();
+	CoachOverlay_ReadBack();
 	setTimeout(CoachOverlay_Loop, g_CoachOverlay_IntervalMs);
 }
 
 function CoachOverlay_Boot() {
 	if (g_CoachOverlay_Started) return;
 	g_CoachOverlay_Started = true;
+	CoachOverlay_InitInbox();
 	// Small initial delay so session.js has finished its first init pass.
 	setTimeout(CoachOverlay_Loop, 500);
 }

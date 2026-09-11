@@ -208,4 +208,9 @@ Settings → Mod Selection. It writes to
 `saves/campaigns/coach-overlay/live_state.json` under the user data
 directory — GUI-context `Engine.WriteJSONFile` is restricted to a few
 prefixes and `saves/campaigns/` is one of them. `live_coach.py` reads
-that path by default.
+that path by default and writes `p_win.json` (fixed 512 bytes — the VFS
+caches file sizes) back into the same directory; the mod reads it every
+5 s and draws "Win NN%" with a bar in the top panel, right of the civ icon.
+Grey means no fresh value in the last 20 s. Full quit + relaunch of 0 A.D.
+is needed after editing the mod: the VFS does not notice changed files on
+macOS.

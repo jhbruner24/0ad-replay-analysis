@@ -28,14 +28,45 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from oadrep import model, schema
 
 
-def state_file_path() -> str:
-    """Wherever Engine.WriteJSONFile puts our relative path."""
+# The mod writes live_state.json here and reads p_win.json back from the same
+# directory to draw the in-game panel.
+MOD_DIR = "saves/campaigns/coach-overlay"
+
+# The engine's VFS records a file's size when it first sees it and reads exactly
+# that many bytes on every subsequent load (lib/file/vfs/vfs.cpp, LoadFile). The
+# mod creates p_win.json at this size and we must overwrite it at this size, or
+# the game reads a truncated/stale document. Keep in sync with coach_overlay.js.
+P_WIN_BYTES = 512
+
+
+def user_data_dir() -> str:
+    """Where the engine puts its user data (the VFS root for saves/)."""
     home = os.path.expanduser("~")
     if platform.system() == "Darwin":
-        return f"{home}/Library/Application Support/0ad/saves/campaigns/coach-overlay/live_state.json"
+        return f"{home}/Library/Application Support/0ad"
     if platform.system() == "Windows":
-        return f"{home}/AppData/Roaming/0ad/saves/campaigns/coach-overlay/live_state.json"
-    return f"{home}/.local/share/0ad/saves/campaigns/coach-overlay/live_state.json"
+        return f"{home}/AppData/Roaming/0ad"
+    return f"{home}/.local/share/0ad"
+
+
+def state_file_path() -> str:
+    return f"{user_data_dir()}/{MOD_DIR}/live_state.json"
+
+
+def p_win_path() -> str:
+    return f"{user_data_dir()}/{MOD_DIR}/p_win.json"
+
+
+def write_p_win(path: str, payload: dict) -> None:
+    """Overwrite p_win.json at exactly P_WIN_BYTES (space-padded), atomically."""
+    body = json.dumps(payload, separators=(",", ":"))
+    if len(body) > P_WIN_BYTES:
+        raise ValueError(f"p_win payload {len(body)}B exceeds {P_WIN_BYTES}B")
+    body = body + " " * (P_WIN_BYTES - len(body))
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="ascii") as fh:
+        fh.write(body)
+    os.replace(tmp, path)
 
 
 def _flatten_sequences(raw):
@@ -117,14 +148,20 @@ def _pick_perspective(state: dict, me_nicks: set[str], opp_nicks: set[str]):
 
     me_idx = them_idx = None
     me_rating = them_rating = None
+    others = []
     for i, p in enumerate(players):
-        if not isinstance(p, dict):
+        if not isinstance(p, dict) or i == 0:  # 0 is Gaia
             continue
         nick, rating = _split(str(p.get("name", "")))
         if nick in me_nicks and me_idx is None:
             me_idx, me_rating = i, rating
         elif nick in opp_nicks and them_idx is None:
             them_idx, them_rating = i, rating
+        else:
+            others.append((i, rating))
+    # In a 1v1 the opponent is whoever else is on the map, named or not.
+    if me_idx is not None and them_idx is None and len(others) == 1:
+        them_idx, them_rating = others[0]
     if me_idx is None or them_idx is None:
         return None, None, 0
     rating_diff = ((me_rating or 0) - (them_rating or 0)) if me_rating and them_rating else 0
@@ -171,6 +208,8 @@ def main():
           flush=True)
 
     state_path = args.state_file or state_file_path()
+    out_path = (os.path.join(os.path.dirname(args.state_file), "p_win.json")
+                if args.state_file else p_win_path())
     print(f"\nWatching {state_path}\n(Start a game; hit ^C to stop.)\n", flush=True)
 
     import numpy as np
@@ -211,6 +250,12 @@ def main():
         term_w = shutil.get_terminal_size(fallback=(80, 20)).columns
         line = f"t={t/60:>5.1f}min  P(win)={p:>5.1%}  {_bar(p, min(50, term_w-30))}"
         print("\r" + line, end="\n", flush=True)
+        try:
+            write_p_win(out_path, {"schema": 1, "p": round(p, 4),
+                                   "t_seconds": t, "tick": state.get("tick"),
+                                   "written_at_ms": int(time.time() * 1000)})
+        except OSError as e:
+            print(f"  (could not write {out_path}: {e})", flush=True)
 
 
 if __name__ == "__main__":
