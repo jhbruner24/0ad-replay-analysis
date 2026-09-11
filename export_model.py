@@ -44,6 +44,7 @@ def main():
     ap.add_argument("--opp", default="", help="comma-separated opponent aliases")
     ap.add_argument("--step", type=int, default=15)
     ap.add_argument("--halflife", type=int, default=200)
+    ap.add_argument("--clip", type=float, default=model.DEFAULT_CLIP)
     ap.add_argument("--with-skill", action="store_true")
     ap.add_argument("--root")
     ap.add_argument("--out", default=os.path.join(MOD_SRC, MODEL_REL))
@@ -68,9 +69,10 @@ def main():
         samples = model.position_only(samples)
     print(f"  fitting on {n_games} games ({len(samples)} samples"
           f"{'' if args.with_skill else ', position-only'})...", flush=True)
-    fit, names = model.train(samples, recency_halflife_games=args.halflife)
+    fit, names = model.train(samples, recency_halflife_games=args.halflife,
+                             clip_quantile=args.clip)
 
-    exp = model.export_json(fit, names)
+    exp = model.export_json(fit, names, model.state_feature_spec())
     exp["trained_on_games"] = n_games
     exp["position_only"] = not args.with_skill
     os.makedirs(os.path.dirname(args.out), exist_ok=True)

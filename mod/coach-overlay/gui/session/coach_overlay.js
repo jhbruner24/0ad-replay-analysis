@@ -43,11 +43,13 @@ function CoachOverlay_Interp(xs, ys, d) {
 }
 
 function CoachOverlay_Predict(model, feats) {
-	var names = model.names, mu = model.mu, sd = model.sd;
+	var names = model.names, mu = model.mu, sd = model.sd, lo = model.lo, hi = model.hi;
 	var z = new Array(names.length);
 	for (var i = 0; i < names.length; ++i) {
 		var v = feats[names[i]];
-		z[i] = ((v === undefined ? 0 : v) - mu[i]) / sd[i];
+		if (v === undefined) v = 0;
+		if (lo) v = Math.min(Math.max(v, lo[i]), hi[i]);
+		z[i] = (v - mu[i]) / sd[i];
 	}
 	var total = 0;
 	for (var m = 0; m < model.members.length; ++m) {
@@ -59,7 +61,7 @@ function CoachOverlay_Predict(model, feats) {
 	return total / model.members.length;
 }
 
-/* ---------- features: mirrors live_coach._live_features ---------- */
+/* ---------- features: mirrors oadrep.model.live_features ---------- */
 
 function CoachOverlay_FlattenSequences(raw) {
 	var out = {};
@@ -77,27 +79,84 @@ function CoachOverlay_FlattenSequences(raw) {
 	return out;
 }
 
-function CoachOverlay_Last(series) {
-	if (!Array.isArray(series)) return null;
-	for (var i = series.length - 1; i >= 0; --i)
-		if (typeof series[i] === "number") return series[i];
-	return null;
+// model._value_at: value at or just before t (times ascending).
+function CoachOverlay_ValueAt(times, values, t) {
+	var last = null;
+	for (var i = 0; i < times.length && i < values.length; ++i) {
+		if (times[i] > t) break;
+		if (typeof values[i] === "number") last = values[i];
+	}
+	return last;
 }
 
-function CoachOverlay_Features(model, tSeconds, mine, them) {
-	// Command features are not available live and rating is deliberately
-	// absent (position-only model); both stay at their zero default.
-	var feats = { "t_log": Math.log(tSeconds + 1), "rating_diff": 0, "rated": 0 };
+// model.spec_value
+function CoachOverlay_SpecValue(times, seqs, terms, window, t) {
+	function totalAt(tt) {
+		var total = 0, seen = false;
+		for (var i = 0; i < terms.length; ++i) {
+			var series = seqs[terms[i][0]];
+			if (!series || !series.length) continue;
+			var v = CoachOverlay_ValueAt(times, series, tt);
+			if (v === null) continue;
+			seen = true;
+			total += terms[i][1] * v;
+		}
+		return seen ? total : null;
+	}
+	var now = totalAt(t);
+	if (now === null) return null;
+	if (window === null || window === undefined) return now;
+	var before = totalAt(t - window);
+	return (now - (before === null ? 0 : before)) / window;
+}
+
+// model.UNIT_COST — keep in sync.
+var g_CoachOverlay_UnitCost = { "Worker": 110, "Cavalry": 180, "Champion": 260,
+	"Siege": 380, "Ship": 220, "Hero": 600, "Trader": 180 };
+
+// model._live_lookup
+function CoachOverlay_LiveLookup(player, key) {
+	if (key == "army_value") {
+		var counts = player.classCounts;
+		if (!counts || typeof counts !== "object") return null;
+		var total = 0;
+		for (var c in g_CoachOverlay_UnitCost)
+			total += g_CoachOverlay_UnitCost[c] * (counts[c] || 0);
+		return total;
+	}
+	var cur = player;
+	var parts = key.split(".");
+	for (var i = 0; i < parts.length; ++i) {
+		if (!cur || typeof cur !== "object") return null;
+		cur = cur[parts[i]];
+	}
+	if (cur === undefined || cur === null)
+		return key.indexOf("classCounts.") === 0 ? 0 : null;
+	return typeof cur === "number" ? cur : null;
+}
+
+// model.live_features: rating and command features are absent live and
+// stay at their zero default.
+function CoachOverlay_Features(model, mine, them) {
 	var mineSeq = CoachOverlay_FlattenSequences(mine.sequences);
 	var themSeq = CoachOverlay_FlattenSequences(them.sequences);
-	for (var i = 0; i < model.names.length; ++i) {
-		var name = model.names[i];
-		if (name.indexOf("diff.") !== 0) continue;
-		var stat = name.substring(5);
-		var my = CoachOverlay_Last(mineSeq[stat]);
+	var mineTimes = (mine.sequences && mine.sequences.time) || [];
+	var themTimes = (them.sequences && them.sequences.time) || [];
+	var t = mineTimes.length ? mineTimes[mineTimes.length - 1] : 0;
+	var feats = { "t_log": Math.log(t + 1) };
+	for (var name in model.spec) {
+		var e = model.spec[name];
+		var my = null, their = null;
+		if (e.live) {
+			my = CoachOverlay_LiveLookup(mine, e.live);
+			their = CoachOverlay_LiveLookup(them, e.live);
+		}
+		if (my === null) {
+			my = CoachOverlay_SpecValue(mineTimes, mineSeq, e.terms, e.window, t);
+			their = CoachOverlay_SpecValue(themTimes, themSeq, e.terms, e.window, t);
+		}
 		if (my === null) continue;
-		var their = CoachOverlay_Last(themSeq[stat]);
-		feats[name] = my - (their === null ? 0 : their);
+		feats["diff." + name] = my - (their === null ? 0 : their);
 	}
 	return feats;
 }
@@ -166,7 +225,7 @@ function CoachOverlay_Tick() {
 			CoachOverlay_Draw("coach: 1v1 only", null);
 			return;
 		}
-		var feats = CoachOverlay_Features(g_CoachOverlay_Model, tSeconds,
+		var feats = CoachOverlay_Features(g_CoachOverlay_Model,
 			players[persp.me], players[persp.them]);
 		var p = CoachOverlay_Predict(g_CoachOverlay_Model, feats);
 		CoachOverlay_Draw("Win " + Math.round(p * 100) + "%", p);

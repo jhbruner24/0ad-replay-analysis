@@ -57,15 +57,187 @@ FEATURE_PREFIXES = [
 ]
 
 
+# Position features: what is on the map *now*, not what has happened so far.
+# Raw sequences are mostly cumulative counters (resourcesUsed, unitsTrained,
+# ...) that never go down, so a model fit on them cannot see a lead evaporate:
+# a player who spent 20k metal on an army keeps the credit after the army is
+# dead. These derive current state instead. Each entry is
+#   name: {"terms": [(stat, coef), ...], "window": W or None, "live": key or None}
+#   value(t) = sum(coef * stat(t)) over terms; with a window W it is a rate,
+#   (S(t) - S(t-W)) / W.
+# Every feature enters the model as a differential, mine - theirs. The
+# exported model.json carries this spec and coach_overlay.js evaluates it the
+# same way.
+#
+# "live": in a running game GetExtendedSimulationState carries exact current
+# counts (popCount, resourceCounts, classCounts) that replays do not keep, and
+# which are also better than the derived value: the engine does not count
+# units their owner deleted as lost (Health.Kill skips KilledBy), and the
+# `total` bucket of unitsLost/buildingsLost is never incremented at all, so
+# trained - lost drifts high. The live key names the exact source; the
+# derived terms are what training uses.
+UNIT_CLASSES = ("Infantry", "Cavalry", "Champion", "Siege", "Ship", "Hero",
+                "Worker", "Trader")
+# Rough template cost per unit class, for valuing an army from counts. The
+# classes do not overlap (citizen infantry are Workers; champions and heroes
+# are not), so summing over them counts each unit once.
+UNIT_COST = {"Worker": 110, "Cavalry": 180, "Champion": 260, "Siege": 380,
+             "Ship": 220, "Hero": 600, "Trader": 180}
+BUILDING_CLASSES = ("Structure", "CivCentre", "Fortress", "House", "Military",
+                    "Economic", "Outpost", "Wonder")
+RESOURCES = ("food", "wood", "stone", "metal")
+RATE_WINDOW = 60.0
+# Winsorisation quantile for train(); 0.15 maximised holdout AUC (0.782 vs
+# 0.742 unclipped) on the wace8000 corpus and bounds extrapolation.
+DEFAULT_CLIP = 0.15
+
+
+def _entry(terms, window=None, live=None):
+    return {"terms": terms, "window": window, "live": live}
+
+
+def state_feature_spec(material=True):
+    spec = {
+        "state.pop": _entry([("populationCount", 1)], live="popCount"),
+        "state.map_control": _entry([("percentMapControlled", 1)]),
+        "state.map_explored": _entry([("percentMapExplored", 1)]),
+        "income.trade": _entry([("tradeIncome", 1)], RATE_WINDOW),
+        "momentum.value_lost": _entry([("unitsLostValue", 1), ("buildingsLostValue", 1)], RATE_WINDOW),
+    }
+    if material:
+        # Value of everything still standing: all resources ever spent, less
+        # the value of what has been lost. Techs count as standing. Split into
+        # the army (units alive x rough template cost, so the live exact
+        # counts apply) and the rest (buildings + techs), because a big tech
+        # bill with no army is a very different position from the reverse.
+        army = [(f"unitsTrained.{c}", cost) for c, cost in UNIT_COST.items()] \
+             + [(f"unitsLost.{c}", -cost) for c, cost in UNIT_COST.items()] \
+             + [(f"unitsCaptured.{c}", cost) for c, cost in UNIT_COST.items()]
+        spec["material.army"] = _entry(army, live="army_value")
+        spec["material.infra"] = _entry([(f"resourcesUsed.{r}", 1) for r in RESOURCES]
+                                        + [("unitsLostValue", -1), ("buildingsLostValue", -1)]
+                                        + [(st, -c) for st, c in army])
+    for r in RESOURCES:
+        spec[f"state.res.{r}"] = _entry([(f"resourcesCount.{r}", 1)], live=f"resourceCounts.{r}")
+        spec[f"income.{r}"] = _entry([(f"resourcesGathered.{r}", 1)], RATE_WINDOW)
+    for c in UNIT_CLASSES:
+        spec[f"alive.units.{c}"] = _entry([(f"unitsTrained.{c}", 1), (f"unitsLost.{c}", -1),
+                                           (f"unitsCaptured.{c}", 1)], live=f"classCounts.{c}")
+    for c in BUILDING_CLASSES:
+        spec[f"alive.buildings.{c}"] = _entry([(f"buildingsConstructed.{c}", 1),
+                                               (f"buildingsLost.{c}", -1),
+                                               (f"buildingsCaptured.{c}", 1)],
+                                              live=f"classCounts.{c}")
+    return spec
+
+
+def _live_lookup_path(player_state, key):
+    """`a.b` -> player_state["a"]["b"]; a missing classCounts key means 0."""
+    cur = player_state
+    for part in key.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    if cur is None:
+        return 0.0 if key.startswith("classCounts.") else None
+    return float(cur) if isinstance(cur, (int, float)) else None
+
+
+def _live_lookup(player_state, key):
+    if key == "army_value":
+        counts = player_state.get("classCounts")
+        if not isinstance(counts, dict):
+            return None
+        return float(sum(cost * (counts.get(c) or 0) for c, cost in UNIT_COST.items()))
+    return _live_lookup_path(player_state, key)
+
+
+def spec_value(times, seqs, terms, window, t):
+    """Evaluate one spec entry for one player at time t. None if no data."""
+    def total_at(tt):
+        total, seen = 0.0, False
+        for stat, coef in terms:
+            series = seqs.get(stat)
+            if not series:
+                continue
+            v = _value_at(times, series, tt)
+            if v is None:
+                continue
+            seen = True
+            total += coef * v
+        return total if seen else None
+    now = total_at(t)
+    if now is None:
+        return None
+    if window is None:
+        return now
+    before = total_at(t - window)
+    return (now - (0.0 if before is None else before)) / window
+
+
+def diff_features(spec, t, mine_times, mine_seqs, them_times, them_seqs,
+                  mine_live=None, them_live=None):
+    """The perspective-free part of a feature dict: t_log plus one
+    `diff.<name>` per spec entry, mine - theirs (theirs 0 if absent).
+
+    `mine_live`/`them_live` are the per-player objects from a running game's
+    GetExtendedSimulationState; when given, entries with a "live" key read
+    the exact current value from there instead of deriving it.
+    """
+    feats = {"t_log": math.log(t + 1)}
+    for name, e in spec.items():
+        my_v = their_v = None
+        if e.get("live") and mine_live is not None and them_live is not None:
+            my_v = _live_lookup(mine_live, e["live"])
+            their_v = _live_lookup(them_live, e["live"])
+        if my_v is None:
+            my_v = spec_value(mine_times, mine_seqs, e["terms"], e["window"], t)
+            their_v = spec_value(them_times, them_seqs, e["terms"], e["window"], t)
+        if my_v is None:
+            continue
+        feats[f"diff.{name}"] = my_v - (their_v or 0.0)
+    return feats
+
+
+def live_features(spec, mine_live, them_live):
+    """Feature dict for one live GetExtendedSimulationState player pair.
+    Uses the last sequence entry as "now" for derived stats; exact live counts
+    for entries that have them."""
+    mine_seq = flatten_sequences(mine_live.get("sequences"))
+    them_seq = flatten_sequences(them_live.get("sequences"))
+    mine_times = (mine_live.get("sequences") or {}).get("time") or []
+    them_times = (them_live.get("sequences") or {}).get("time") or []
+    t = float(mine_times[-1]) if mine_times else 0.0
+    return diff_features(spec, t, mine_times, mine_seq, them_times, them_seq,
+                         mine_live, them_live)
+
+
+def flatten_sequences(raw):
+    """`{"a": [..], "b": {"x": [..]}}` -> `{"a": [..], "b.x": [..]}`; drops time."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for stat, series in raw.items():
+        if stat == "time":
+            continue
+        if isinstance(series, list):
+            out[stat] = series
+        elif isinstance(series, dict):
+            for sub, vals in series.items():
+                if isinstance(vals, list):
+                    out[f"{stat}.{sub}"] = vals
+    return out
+
+
 def _value_at(times, values, t):
     """Value at or just before time t. Times are ascending; values counter-like."""
-    last = None
-    for ti, vi in zip(times, values):
-        if ti > t:
-            break
+    i = min(bisect.bisect_right(times, t), len(values)) - 1
+    while i >= 0:
+        vi = values[i]
         if isinstance(vi, (int, float)):
-            last = vi
-    return last
+            return vi
+        i -= 1
+    return None
 
 
 def _select_features(sequences):
@@ -92,8 +264,12 @@ class Sample:
 
 
 def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
-                  cmd_window=30, load_commands=True):
+                  cmd_window=30, load_commands=True, spec="state"):
     """One sample per (game, time-of-observation).
+
+    `spec`: "state" (default) derives position features via
+    `state_feature_spec`; None uses the raw cumulative sequence stats, kept for
+    comparison.
 
     By default emits a sample every `step` seconds up to `until` seconds. The
     stat features come from the 30-second `sequences` (last-observation-carried-
@@ -106,6 +282,8 @@ def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
     stats-only model - use it as a baseline).
     """
     from . import commands as commands_mod
+    if spec == "state":
+        spec = state_feature_spec()
     if ts is None:
         ts = tuple(range(step, until + 1, step))
     samples = []
@@ -130,13 +308,20 @@ def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
         feat_names = _select_features(mine.sequences)
         if not feat_names:
             continue
+        mine_times, them_times = mine.times, them.times
 
         events = commands_mod.parse_for_game(game.directory) if load_commands else []
         game_len = mine.times[-1] if mine.times else 0
         for t in ts:
             if not mine.times or t > game_len:
                 continue
-            feats = {"t_log": math.log(t + 1), "rating_diff": rating_diff, "rated": rated}
+            if spec:
+                feats = diff_features(spec, t, mine_times, mine.sequences,
+                                      them_times, them.sequences)
+            else:
+                feats = {"t_log": math.log(t + 1)}
+            feats["rating_diff"] = rating_diff
+            feats["rated"] = rated
             if load_commands:
                 mine_cmd = commands_mod.counts_in_window(events, mine.player_id,
                                                         t - cmd_window, t)
@@ -163,14 +348,15 @@ def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
                     events, mine.player_id, t)
                 feats["cmd.accel_their"] = commands_mod.rate_acceleration(
                     events, them.player_id, t)
-            for name in feat_names:
-                my_series = mine.sequences.get(name)
-                their_series = them.sequences.get(name)
-                my_v = _value_at(mine.times, my_series, t) if my_series else None
-                their_v = _value_at(them.times, their_series, t) if their_series else 0
-                if my_v is None:
-                    continue
-                feats[f"diff.{name}"] = float(my_v) - float(their_v or 0)
+            if not spec:
+                for name in feat_names:
+                    my_series = mine.sequences.get(name)
+                    their_series = them.sequences.get(name)
+                    my_v = _value_at(mine.times, my_series, t) if my_series else None
+                    their_v = _value_at(them.times, their_series, t) if their_series else 0
+                    if my_v is None:
+                        continue
+                    feats[f"diff.{name}"] = float(my_v) - float(their_v or 0)
             samples.append(Sample(
                 game_dir=game.directory, order=game.order, t=t,
                 features=feats, label=int(mine.won),
@@ -234,8 +420,15 @@ def temporal_split(samples, holdout_frac=0.25):
     return train, test, cut
 
 
-def train(samples, recency_halflife_games=None):
+def train(samples, recency_halflife_games=None, clip_quantile=None):
     """Fit a calibrated logistic model on a set of samples.
+
+    `clip_quantile`: if set (e.g. 0.02), winsorise every feature to its
+    [q, 1-q] training quantiles before standardising, at fit and predict
+    time. A linear model extrapolates without limit, so one feature at a
+    value never seen in training (a 40k infrastructure lead) can outvote every
+    other feature; clipping bounds any single feature's say to what the data
+    actually supported.
 
     `recency_halflife_games`: if set, weight each sample by 0.5 ** (games_ago /
     halflife) where games_ago is the rank of that game's order within the
@@ -244,6 +437,11 @@ def train(samples, recency_halflife_games=None):
     matchup drift the census showed. None disables weighting.
     """
     X, y, _, names = _to_matrix(samples)
+    lo = hi = None
+    if clip_quantile:
+        lo = np.quantile(X, clip_quantile, axis=0)
+        hi = np.quantile(X, 1 - clip_quantile, axis=0)
+        X = np.clip(X, lo, hi)
     # Standardise manually. Wrapping LR in a Pipeline breaks sample_weight
     # forwarding through CalibratedClassifierCV (sklearn issue #21134).
     mu = X.mean(axis=0)
@@ -262,7 +460,7 @@ def train(samples, recency_halflife_games=None):
     fitted = CalibratedClassifierCV(base, method="isotonic", cv=5)
     fit_kwargs = {"sample_weight": weights} if weights is not None else {}
     fitted.fit(Xz, y, **fit_kwargs)
-    return _StandardisedModel(fitted, mu, sd), names
+    return _StandardisedModel(fitted, mu, sd, lo, hi), names
 
 
 @dataclass
@@ -271,12 +469,16 @@ class _StandardisedModel:
     inner: object
     mu: np.ndarray
     sd: np.ndarray
+    lo: np.ndarray | None = None
+    hi: np.ndarray | None = None
 
     def predict_proba(self, X):
+        if self.lo is not None:
+            X = np.clip(X, self.lo, self.hi)
         return self.inner.predict_proba((X - self.mu) / self.sd)
 
 
-def export_json(fit, names):
+def export_json(fit, names, spec=None):
     """Serialise a trained model so something without sklearn can score it.
 
     Consumed by the coach-overlay mod's JS (gui/session/coach_overlay.js),
@@ -297,18 +499,27 @@ def export_json(fit, names):
             "iso_y": [float(y) for y in iso.y_thresholds_],
         })
     return {
-        "schema": 1,
+        "schema": 2,
+        "spec": {name: {"terms": [[st, c] for st, c in e["terms"]],
+                        "window": e["window"], "live": e["live"]}
+                 for name, e in (spec or {}).items()},
         "names": list(names),
         "mu": [float(v) for v in fit.mu],
         "sd": [float(v) for v in fit.sd],
+        "lo": None if fit.lo is None else [float(v) for v in fit.lo],
+        "hi": None if fit.hi is None else [float(v) for v in fit.hi],
         "members": members,
     }
 
 
 def predict_from_export(exp, feats):
     """Pure-Python scoring of an `export_json` dict. Reference for the JS."""
-    z = [(feats.get(n, 0.0) - mu) / sd
-         for n, mu, sd in zip(exp["names"], exp["mu"], exp["sd"])]
+    z = []
+    for i, n in enumerate(exp["names"]):
+        v = feats.get(n, 0.0)
+        if exp.get("lo") is not None:
+            v = min(max(v, exp["lo"][i]), exp["hi"][i])
+        z.append((v - exp["mu"][i]) / exp["sd"][i])
     total = 0.0
     for m in exp["members"]:
         d = m["intercept"] + sum(c * v for c, v in zip(m["coef"], z))

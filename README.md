@@ -210,6 +210,16 @@ directory — GUI-context `Engine.WriteJSONFile` is restricted to a few
 prefixes and `saves/campaigns/` is one of them. `live_coach.py` reads
 that path if you want the number in a terminal too.
 
+Features are *position*, not history (`oadrep.model.state_feature_spec`):
+population, stockpiles, map control, units and buildings alive per class,
+army value, infrastructure value (spent minus lost minus army), income and
+loss rates over the last minute. Raw sequence counters are cumulative and
+can't see a lead evaporate. In-game the exact `popCount`, `resourceCounts`
+and `classCounts` replace the derived values (the engine doesn't count
+owner-deleted units as lost). Features are winsorised at the 15th/85th
+training percentiles, which both lifted holdout AUC (0.74 → 0.78) and stops
+one extreme feature outvoting all the others.
+
 The mod scores the game itself: `export_model.py` fits the model on the
 replay collection and writes the coefficients and isotonic calibration to
 `mod/coach-overlay/gui/coach-overlay/model.json`; `coach_overlay.js`

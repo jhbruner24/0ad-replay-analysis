@@ -42,6 +42,22 @@ def _instant(n, base, spread, rng):
             for i in range(n)]
 
 
+UNIT_CLASSES = ("total", "Infantry", "Cavalry", "Champion", "Siege", "Ship",
+                "Hero", "Worker", "Trader", "Unit")
+BUILDING_CLASSES = ("total", "Economic", "CivCentre", "Fortress", "House",
+                    "Military", "Outpost", "Structure", "Wonder")
+
+
+def _by_class(n, classes, rate, rng, total=True):
+    out = {}
+    for c in classes:
+        if c == "total" and not total:
+            out[c] = [0] * n
+        else:
+            out[c] = _series(n, rate * (1.0 if c in ("total", "Unit", "Structure", "Worker") else 0.3), 0.4, rng)
+    return out
+
+
 def _player(name, civ, won, snapshots, rng):
     times = [30.0 * (k + 1) for k in range(snapshots)]
 
@@ -72,10 +88,18 @@ def _player(name, civ, won, snapshots, rng):
             "populationCount": _instant(snapshots, 60 if won else 45, 12, rng),
             "percentMapControlled": _instant(snapshots, 22 if won else 16, 4, rng),
             "percentMapExplored": _instant(snapshots, 40, 10, rng),
-            "unitsTrained": _series(snapshots, 2.0, 0.3, rng),
-            "unitsLost": _series(snapshots, 0.7 if won else 1.1, 0.5, rng),
-            "enemyUnitsKilled": _series(snapshots, 1.1 if won else 0.7, 0.5, rng),
-            "buildingsConstructed": _series(snapshots, 0.4, 0.4, rng),
+            # Per-class counters as v0.27+ writes them. The engine never
+            # increments the `total` bucket of the *Lost counters; mirror that.
+            "unitsTrained": _by_class(snapshots, UNIT_CLASSES, 2.0, rng),
+            "unitsLost": _by_class(snapshots, UNIT_CLASSES, 0.7 if won else 1.1, rng, total=False),
+            "unitsCaptured": _by_class(snapshots, UNIT_CLASSES, 0.02, rng),
+            "enemyUnitsKilled": _by_class(snapshots, UNIT_CLASSES, 1.1 if won else 0.7, rng),
+            "unitsLostValue": _series(snapshots, 80 if won else 120, 0.5, rng),
+            "buildingsConstructed": _by_class(snapshots, BUILDING_CLASSES, 0.4, rng),
+            "buildingsLost": _by_class(snapshots, BUILDING_CLASSES, 0.05, rng, total=False),
+            "buildingsCaptured": _by_class(snapshots, BUILDING_CLASSES, 0.01, rng),
+            "buildingsLostValue": _series(snapshots, 10, 0.5, rng),
+            "tradeIncome": _series(snapshots, 5, 0.5, rng),
             "resourcesGathered": {
                 "food": food,
                 "wood": _series(snapshots, 70, 0.25, rng),
@@ -85,6 +109,8 @@ def _player(name, civ, won, snapshots, rng):
             "resourcesUsed": {
                 "food": _series(snapshots, 60, 0.3, rng),
                 "wood": _series(snapshots, 55, 0.3, rng),
+                "stone": _series(snapshots, 20, 0.4, rng),
+                "metal": _series(snapshots, 25, 0.4, rng),
             },
             "resourcesCount": {
                 "food": _instant(snapshots, 400, 250, rng),

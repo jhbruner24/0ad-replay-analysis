@@ -100,9 +100,10 @@ class EndToEndOnSyntheticCollection(unittest.TestCase):
         s = self.samples[0]
         self.assertIn("t_log", s.features)
         self.assertIn("rating_diff", s.features)
-        # And at least one differential from the planted signal stat family.
-        self.assertTrue(any(k.startswith("diff.resourcesGathered.")
-                            for k in s.features))
+        # And the position features derived from the planted signal stats.
+        self.assertIn("diff.income.food", s.features)
+        self.assertIn("diff.alive.units.Infantry", s.features)
+        self.assertIn("diff.material.army", s.features)
 
     def test_temporal_split_does_not_leak_games(self):
         train, test, _ = model.temporal_split(self.samples, holdout_frac=0.3)
@@ -165,25 +166,76 @@ class EndToEndOnSyntheticCollection(unittest.TestCase):
         for s, w in zip(test[:200], want):
             self.assertAlmostEqual(model.predict_from_export(exp, s.features), w, places=9)
 
-    def test_js_predictor_matches_python(self):
-        """Run the mod's JS scorer under node against the same export."""
+    def test_clipping_bounds_extrapolation(self):
+        train, test, _ = model.temporal_split(self.samples, holdout_frac=0.3)
+        fit, names = model.train(train, clip_quantile=0.1)
+        exp = model.export_json(fit, names)
+        self.assertEqual(len(exp["lo"]), len(names))
+        feats = dict(test[0].features)
+        big = {k: (v * 1e6 if k.startswith("diff.") else v) for k, v in feats.items()}
+        clipped = {k: (min(max(v, lo), hi)) for (k, v), lo, hi
+                   in zip(((n, big.get(n, 0.0)) for n in names), exp["lo"], exp["hi"])}
+        self.assertAlmostEqual(model.predict_from_export(exp, big),
+                               model.predict_from_export(exp, clipped), places=12)
+
+    def test_live_features_prefer_exact_counts(self):
+        spec = model.state_feature_spec()
+        game = next(g for g in self.games if g.decided)
+        mine, them = game.perspective(["Me"])
+        def live(player, **exact):
+            seqs = {"time": list(player.times)}
+            for k, v in player.sequences.items():
+                stat, _, sub = k.partition(".")
+                if sub:
+                    seqs.setdefault(stat, {})[sub] = list(v)
+                else:
+                    seqs[stat] = list(v)
+            return {"sequences": seqs, **exact}
+        a = model.live_features(spec, live(mine), live(them))
+        b = model.live_features(spec, live(mine, popCount=1, classCounts={"Worker": 0}),
+                                live(them, popCount=40, classCounts={"Worker": 30}))
+        self.assertEqual(b["diff.state.pop"], -39.0)
+        self.assertEqual(b["diff.alive.units.Worker"], -30.0)
+        self.assertEqual(b["diff.material.army"], -30 * model.UNIT_COST["Worker"])
+        self.assertEqual(a["diff.state.map_control"], b["diff.state.map_control"])
+
+    def test_js_matches_python_end_to_end(self):
+        """Run the mod's JS feature extraction + scorer under node against a
+        live-shaped payload and the same export."""
         node = shutil.which("node")
         if not node:
             self.skipTest("node not installed")
+        spec = model.state_feature_spec()
         train, test, _ = model.temporal_split(self.samples, holdout_frac=0.3)
-        fit, names = model.train(train)
-        exp = model.export_json(fit, names)
-        cases = [s.features for s in test[:50]]
+        fit, names = model.train(train, clip_quantile=0.1)
+        exp = model.export_json(fit, names, spec)
+        cases = []
+        for game in [g for g in self.games if g.decided][:20]:
+            mine, them = game.perspective(["Me"])
+            def live(player, extra):
+                seqs = {"time": list(player.times)}
+                for k, v in player.sequences.items():
+                    stat, _, sub = k.partition(".")
+                    if sub:
+                        seqs.setdefault(stat, {})[sub] = list(v)
+                    else:
+                        seqs[stat] = list(v)
+                return {"sequences": seqs, **extra}
+            cases.append([live(mine, {"popCount": 33, "classCounts": {"Worker": 20, "Cavalry": 2}}),
+                          live(them, {"popCount": 41, "classCounts": {"Worker": 25}})])
         js = os.path.join(os.path.dirname(__file__), "..", "mod", "coach-overlay",
                           "gui", "session", "coach_overlay.js")
         script = (open(js, encoding="utf-8").read()
                   + "\nconst [model, cases] = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
-                  + "\nconsole.log(JSON.stringify(cases.map(f => CoachOverlay_Predict(model, f))));")
+                  + "\nconsole.log(JSON.stringify(cases.map(([a, b]) =>"
+                  + " CoachOverlay_Predict(model, CoachOverlay_Features(model, a, b)))));")
         out = subprocess.run([node, "-e", script], input=json.dumps([exp, cases]),
                              capture_output=True, text=True, check=True).stdout
         got = json.loads(out)
-        for f, g in zip(cases, got):
-            self.assertAlmostEqual(g, model.predict_from_export(exp, f), places=9)
+        self.assertEqual(len(got), len(cases))
+        for (a, b), g in zip(cases, got):
+            want = model.predict_from_export(exp, model.live_features(spec, a, b))
+            self.assertAlmostEqual(g, want, places=9)
 
 
 class PlayerIdMapping(unittest.TestCase):

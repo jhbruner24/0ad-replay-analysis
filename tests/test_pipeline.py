@@ -158,7 +158,10 @@ class RealWorldParsing(unittest.TestCase):
 
     def test_one_player_is_not_fragmented_across_ratings(self):
         nicks = {p.nick for g in self.games for p in g.players}
-        self.assertEqual(nicks, {"jace", "Alec576", "Doovid", "wace8000"})
+        # Every rating variant of a name collapses to the bare nick. (Team
+        # games add an "Ally"; whether one is generated depends on the RNG.)
+        self.assertTrue({"jace", "Alec576", "Doovid", "wace8000"} <= nicks)
+        self.assertTrue(all("(" not in n for n in nicks), nicks)
 
     def test_perspective_matches_across_rating_variants(self):
         matched = [g for g in self.games if g.is_1v1 and g.perspective("jace")]

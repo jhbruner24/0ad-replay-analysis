@@ -37,7 +37,7 @@ def main():
     print(f"\nTemporal split at order {cut}: {len(train_s)} train / {len(test_s)} test")
 
     print("\nTraining logistic regression with isotonic calibration...")
-    fit, names = model.train(train_s)
+    fit, names = model.train(train_s, clip_quantile=model.DEFAULT_CLIP)
     print(f"  {len(names)} features")
 
     def _report(label, samples):
