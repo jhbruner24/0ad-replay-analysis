@@ -77,7 +77,8 @@ function CoachOverlay_Draw(text, p, stale) {
 		return;
 	}
 	bar.hidden = false;
-	var width = bg.size.right - bg.size.left - 2;
+	var cs = bg.getComputedSize();
+	var width = (cs.right - cs.left) - 2;
 	var size = bar.size;
 	size.right = size.left + Math.max(1, Math.round(width * p));
 	bar.size = size;
