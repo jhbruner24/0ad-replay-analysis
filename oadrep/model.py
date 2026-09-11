@@ -145,9 +145,23 @@ def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
                 their_total = sum(their_cmd.values())
                 feats["cmd.total_diff"] = float(mine_total - their_total)
                 feats["cmd.total_mine"] = float(mine_total)
+                # Per-type differentials, unchanged.
                 for ctype in commands_mod.TRACKED_TYPES + ("_other",):
                     feats[f"cmd.{ctype}_diff"] = float(
                         mine_cmd.get(ctype, 0) - their_cmd.get(ctype, 0))
+                # Category rollups: what mode is each player in.
+                mine_cat = commands_mod.category_counts(mine_cmd)
+                their_cat = commands_mod.category_counts(their_cmd)
+                for cat in commands_mod.CATEGORIES:
+                    feats[f"cat.{cat}_diff"] = float(mine_cat[cat] - their_cat[cat])
+                # Diversity of action mix.
+                feats["cmd.entropy_diff"] = (commands_mod.shannon_entropy(mine_cmd)
+                                             - commands_mod.shannon_entropy(their_cmd))
+                # Burst signal: are things happening faster than usual?
+                feats["cmd.accel_mine"] = commands_mod.rate_acceleration(
+                    events, mine.player_id, t)
+                feats["cmd.accel_their"] = commands_mod.rate_acceleration(
+                    events, them.player_id, t)
             for name in feat_names:
                 my_series = mine.sequences.get(name)
                 their_series = them.sequences.get(name)
@@ -180,16 +194,46 @@ def temporal_split(samples, holdout_frac=0.25):
     return train, test, cut
 
 
-def train(samples):
-    """Fit a calibrated logistic model on a set of samples."""
+def train(samples, recency_halflife_games=None):
+    """Fit a calibrated logistic model on a set of samples.
+
+    `recency_halflife_games`: if set, weight each sample by 0.5 ** (games_ago /
+    halflife) where games_ago is the rank of that game's order within the
+    training set counting back from newest. A halflife of 100 means a game 200
+    games older has 1/4 the weight of the most recent game. This fights the
+    matchup drift the census showed. None disables weighting.
+    """
     X, y, _, names = _to_matrix(samples)
-    base = Pipeline([("scale", StandardScaler()),
-                     ("lr", LogisticRegression(C=0.5, max_iter=1000))])
-    # Calibrated wrapper: fits base on train folds, calibrates probabilities on
-    # the held-out folds. Prefit=False so it does the split internally.
-    model = CalibratedClassifierCV(base, method="isotonic", cv=5)
-    model.fit(X, y)
-    return model, names
+    # Standardise manually. Wrapping LR in a Pipeline breaks sample_weight
+    # forwarding through CalibratedClassifierCV (sklearn issue #21134).
+    mu = X.mean(axis=0)
+    sd = X.std(axis=0)
+    sd[sd == 0] = 1.0
+    Xz = (X - mu) / sd
+
+    weights = None
+    if recency_halflife_games:
+        orders = sorted({s.order for s in samples})
+        rank = {o: i for i, o in enumerate(reversed(orders))}   # 0 = newest game
+        weights = np.array([0.5 ** (rank[s.order] / recency_halflife_games)
+                            for s in samples])
+
+    base = LogisticRegression(C=0.5, max_iter=1000)
+    fitted = CalibratedClassifierCV(base, method="isotonic", cv=5)
+    fit_kwargs = {"sample_weight": weights} if weights is not None else {}
+    fitted.fit(Xz, y, **fit_kwargs)
+    return _StandardisedModel(fitted, mu, sd), names
+
+
+@dataclass
+class _StandardisedModel:
+    """Bundles the standardisation with the fitted model for prediction."""
+    inner: object
+    mu: np.ndarray
+    sd: np.ndarray
+
+    def predict_proba(self, X):
+        return self.inner.predict_proba((X - self.mu) / self.sd)
 
 
 def evaluate(model, samples, names):

@@ -120,6 +120,58 @@ def counts_in_window(events, player_id: int, t_start: float, t_end: float) -> Co
     return out
 
 
+# Higher-level categories. A raw count of "walk" commands is dominated by
+# routine unit movement; grouping tells the model whether the player is in
+# economy, army, or defensive mode.
+CATEGORIES = {
+    "economy":     ("gather", "returnresource", "barter", "construct",
+                    "repair", "set-rallypoint"),
+    "military":    ("attack", "walk", "garrison", "unload-template",
+                    "unload-all", "stance", "call-to-arms", "heal"),
+    "production":  ("train", "research", "stop-production"),
+    "defensive":   ("construct-wall", "alert-raise", "alert-end", "garrison"),
+    "surrender":   ("resign",),
+}
+
+
+def category_counts(counts: Counter) -> dict:
+    """Sum tracked-type counts into the higher-level categories."""
+    out = {}
+    for cat, types in CATEGORIES.items():
+        out[cat] = sum(counts.get(t, 0) for t in types)
+    return out
+
+
+def shannon_entropy(counts: Counter) -> float:
+    """Diversity of action mix, natural log. 0 = only one type; high = varied.
+
+    Two players issuing the same number of total commands can have very
+    different distributions: one spamming `walk`, one juggling gather, train,
+    and attack. That distinction is invisible to per-type counts alone.
+    """
+    total = sum(counts.values())
+    if total <= 0:
+        return 0.0
+    from math import log
+    return -sum((c / total) * log(c / total) for c in counts.values() if c > 0)
+
+
+def rate_acceleration(events, player_id: int, t: float,
+                      short: float = 10, long: float = 30) -> float:
+    """Actions/sec in the last `short` seconds minus in the preceding `long`.
+
+    A positive value flags a burst - e.g. an incoming attack triggers many
+    fresh commands in a small window. Negative values flag lulls.
+    """
+    if t < long + short:
+        return 0.0
+    n_short = sum(1 for e in events if e.player_id == player_id
+                  and t - short <= e.t < t)
+    n_long = sum(1 for e in events if e.player_id == player_id
+                 and t - short - long <= e.t < t - short)
+    return n_short / short - n_long / long
+
+
 def parse_for_game(game_directory: str) -> list[Event]:
     """Convenience for pairing with a `schema.Game`."""
     return parse(os.path.join(game_directory, "commands.txt"))
