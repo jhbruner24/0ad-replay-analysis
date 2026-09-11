@@ -151,7 +151,18 @@ def main():
         if not mine:
             print("  No games matched that name.")
         else:
-            histogram("Opponents", Counter(t.name for _, _, t in mine))
+            histogram("Opponents (rating stripped)", Counter(t.nick for _, _, t in mine))
+
+            # Rating differential is the strongest single feature we have.
+            deltas = [me.rating - t.rating for _, me, t in mine
+                      if me.rating is not None and t.rating is not None]
+            if deltas:
+                deltas.sort()
+                mid = deltas[len(deltas)//2]
+                print(f"\nRating differential (you minus opponent):")
+                print(f"  n={len(deltas)}   median {mid:+d}   "
+                      f"min {deltas[0]:+d}   max {deltas[-1]:+d}")
+                print("  Positive = you were the favourite; negative = underdog.")
             histogram("Your outcomes", Counter(me.state for _, me, _ in mine))
 
             decided = [(g, me, t) for g, me, t in mine if me.won is not None]
