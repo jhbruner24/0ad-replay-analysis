@@ -90,8 +90,23 @@ class Sample:
     weight: float = 1.0
 
 
-def build_samples(games, me, opp_aliases=None, ts=(180, 360, 540, 720, 900, 1200, 1500, 1800)):
-    """One sample per (game, time-of-observation)."""
+def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
+                  cmd_window=30, load_commands=True):
+    """One sample per (game, time-of-observation).
+
+    By default emits a sample every `step` seconds up to `until` seconds. The
+    stat features come from the 30-second `sequences` (last-observation-carried-
+    forward, so successive samples inside one 30s window share stats). The
+    command features come from the last `cmd_window` seconds and DO refresh
+    every step, so a `step=5` grid delivers real 5-second-resolution updates
+    even though the stats sampler is fixed at 30 seconds.
+
+    Set `load_commands=False` to skip parsing commands.txt (much faster,
+    stats-only model - use it as a baseline).
+    """
+    from . import commands as commands_mod
+    if ts is None:
+        ts = tuple(range(step, until + 1, step))
     samples = []
     for game in games:
         if not game.decided:
@@ -114,10 +129,25 @@ def build_samples(games, me, opp_aliases=None, ts=(180, 360, 540, 720, 900, 1200
         feat_names = _select_features(mine.sequences)
         if not feat_names:
             continue
+
+        events = commands_mod.parse_for_game(game.directory) if load_commands else []
+        game_len = mine.times[-1] if mine.times else 0
         for t in ts:
-            if not mine.times or t > mine.times[-1]:
+            if not mine.times or t > game_len:
                 continue
             feats = {"t_log": math.log(t + 1), "rating_diff": rating_diff, "rated": rated}
+            if load_commands:
+                mine_cmd = commands_mod.counts_in_window(events, mine.player_id,
+                                                        t - cmd_window, t)
+                their_cmd = commands_mod.counts_in_window(events, them.player_id,
+                                                         t - cmd_window, t)
+                mine_total = sum(mine_cmd.values())
+                their_total = sum(their_cmd.values())
+                feats["cmd.total_diff"] = float(mine_total - their_total)
+                feats["cmd.total_mine"] = float(mine_total)
+                for ctype in commands_mod.TRACKED_TYPES + ("_other",):
+                    feats[f"cmd.{ctype}_diff"] = float(
+                        mine_cmd.get(ctype, 0) - their_cmd.get(ctype, 0))
             for name in feat_names:
                 my_series = mine.sequences.get(name)
                 their_series = them.sequences.get(name)

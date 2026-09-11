@@ -56,6 +56,7 @@ class Player:
     sequences: dict          # flattened: {"resourcesGathered.food": [...], ...}
     times: list              # seconds, parallel to every series in `sequences`
     snapshot: dict           # end-of-game only: phase, researchedTechs, ...
+    player_id: int = 0       # 1-indexed; matches `cmd <player_id> ...` in commands.txt
 
     @property
     def won(self) -> bool | None:
@@ -194,7 +195,9 @@ def load_game(directory: str) -> Game:
     players = []
     states = (meta or {}).get("playerStates")
     if isinstance(states, list):
-        for entry in states[1:]:                              # A4
+        # A4: `playerStates[i]` for i>=1 corresponds to `cmd i ...` in
+        # commands.txt (Gaia at 0 is not a real player).
+        for idx, entry in enumerate(states[1:], start=1):
             if not isinstance(entry, dict):
                 continue
             seqs = entry.get("sequences")
@@ -207,6 +210,7 @@ def load_game(directory: str) -> Game:
                 name=raw_name,
                 nick=nick,
                 rating=rating,
+                player_id=idx,
                 civ=str(entry.get("civ", "?")),
                 state=str(entry.get("state", "unknown")),     # A5
                 sequences=flatten_sequences(seqs),
