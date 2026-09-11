@@ -177,6 +177,45 @@ def build_samples(games, me, opp_aliases=None, ts=None, step=30, until=1800,
     return samples
 
 
+def position_only(samples):
+    """Strip who-is-playing from a sample set: mirror every sample and drop skill.
+
+    Each sample is duplicated from the opponent's perspective (differentials
+    negated, label flipped) and the rating features are zeroed. The fitted
+    model then has no intercept to lean on and no rating term: at t=0 it says
+    50%, and afterwards it only expresses which side of the differential it
+    would rather be on. The one-sided command features (`cmd.total_mine`)
+    have no mirror and are dropped; the accel pair is swapped.
+
+    The corpus is still one matchup, so *what a lead is worth* is learned from
+    how these two players resolved it - but not *who* holds it.
+    """
+    out = []
+    for s in samples:
+        a, b = {}, {}
+        for k, v in s.features.items():
+            if k in ("rating_diff", "rated"):
+                a[k] = b[k] = 0.0
+            elif k == "cmd.total_mine":
+                continue
+            elif k == "cmd.accel_mine":
+                a[k] = v
+                b["cmd.accel_their"] = v
+            elif k == "cmd.accel_their":
+                a[k] = v
+                b["cmd.accel_mine"] = v
+            elif k.startswith("diff.") or k.endswith("_diff"):
+                a[k] = v
+                b[k] = -v
+            else:  # t_log and anything else perspective-free
+                a[k] = b[k] = v
+        out.append(Sample(game_dir=s.game_dir, order=s.order, t=s.t,
+                          features=a, label=s.label))
+        out.append(Sample(game_dir=s.game_dir, order=s.order, t=s.t,
+                          features=b, label=1 - s.label))
+    return out
+
+
 def _to_matrix(samples):
     names = sorted({k for s in samples for k in s.features.keys()})
     X = np.array([[s.features.get(n, 0.0) for n in names] for s in samples])

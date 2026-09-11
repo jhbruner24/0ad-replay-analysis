@@ -179,6 +179,9 @@ def main():
                     help="override the live-state path (default: platform standard)")
     ap.add_argument("--root", help="replay root for training")
     ap.add_argument("--poll", type=float, default=0.5, help="file poll interval")
+    ap.add_argument("--with-skill", action="store_true",
+                    help="keep the matchup prior and rating term (default: "
+                         "position-only - mirrored training, 50%% at t=0)")
     args = ap.parse_args()
 
     root = schema.find_root(args.root)
@@ -196,8 +199,11 @@ def main():
     )
     if not samples:
         sys.exit("No training samples produced from the historical corpus.")
+    if not args.with_skill:
+        samples = model.position_only(samples)
     print(f"  fitting on {len({s.game_dir for s in samples})} games "
-          f"({len(samples)} samples)...", flush=True)
+          f"({len(samples)} samples"
+          f"{', position-only' if not args.with_skill else ''})...", flush=True)
     fit, feature_names = model.train(samples, recency_halflife_games=args.halflife)
     # Command features live in feature_names too; we zero them out live because
     # the mod doesn't publish the command log. Record their default values.
