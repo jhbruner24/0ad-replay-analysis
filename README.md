@@ -198,3 +198,14 @@ against.
 MIT — see [LICENSE](./LICENSE). Note that this project only *reads* files the game
 produces; it contains no 0 A.D. code. Anything that later ships as a game mod
 would need to consider the engine's own licensing.
+
+## Live overlay mod
+
+`mod/coach-overlay/` is the 0 A.D. GUI mod that publishes
+`GetExtendedSimulationState` every 5 s. Install by copying (or symlinking)
+the directory into your 0 A.D. `mods/` folder, then enable it in
+Settings → Mod Selection. It writes to
+`saves/campaigns/coach-overlay/live_state.json` under the user data
+directory — GUI-context `Engine.WriteJSONFile` is restricted to a few
+prefixes and `saves/campaigns/` is one of them. `live_coach.py` reads
+that path by default.

@@ -1,0 +1,8 @@
+{
+	"name": "coach-overlay",
+	"label": "Coach Overlay",
+	"version": "0.0.1",
+	"description": "Publishes live game state to disk every few seconds so an external tool can compute win probability. Read-only observer; does not change gameplay.",
+	"dependencies": ["0ad>=0.27.0"],
+	"type": "mod"
+}

@@ -2,7 +2,7 @@
 """Read the live_state.json the coach-overlay mod publishes, score it, print.
 
 Pairs with the coach-overlay mod. The mod writes ~/Library/Application Support/
-0ad/coach/live_state.json every N seconds during a live game; this process
+0ad/saves/campaigns/coach-overlay/live_state.json every N seconds during a live game; this process
 tails the file, extracts features the model was trained on, and prints P(win)
 with a small text bar.
 
@@ -32,10 +32,10 @@ def state_file_path() -> str:
     """Wherever Engine.WriteJSONFile puts our relative path."""
     home = os.path.expanduser("~")
     if platform.system() == "Darwin":
-        return f"{home}/Library/Application Support/0ad/coach/live_state.json"
+        return f"{home}/Library/Application Support/0ad/saves/campaigns/coach-overlay/live_state.json"
     if platform.system() == "Windows":
-        return f"{home}/AppData/Roaming/0ad/coach/live_state.json"
-    return f"{home}/.local/share/0ad/coach/live_state.json"
+        return f"{home}/AppData/Roaming/0ad/saves/campaigns/coach-overlay/live_state.json"
+    return f"{home}/.local/share/0ad/saves/campaigns/coach-overlay/live_state.json"
 
 
 def _flatten_sequences(raw):
