@@ -90,7 +90,7 @@ function CoachOverlay_ReadBack() {
 	try {
 		var d = Engine.ReadJSONFile(g_CoachOverlay_InPath);
 		if (!d || typeof d.p !== "number") {
-			CoachOverlay_Draw("coach: waiting for live_coach.py", null, true);
+			CoachOverlay_Draw("coach: no data", null, true);
 			return;
 		}
 		var stale = !d.written_at_ms || (Date.now() - d.written_at_ms) > g_CoachOverlay_StaleMs;

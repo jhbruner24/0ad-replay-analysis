@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Win-probability readout, right of the civ icon. Driven by coach_overlay.js. -->
-<object name="coachWinProb" size="50%+60 7 50%+330 29" ghost="true">
-	<object name="coachWinProbBarBg" type="image" sprite="color: 0 0 0 150" size="0 2 150 100%-2" ghost="true"/>
-	<object name="coachWinProbBar" type="image" sprite="color: 90 200 90 230" size="1 3 1 100%-3" ghost="true"/>
-	<object name="coachWinProbText" type="text" font="sans-bold-stroke-14" textcolor="white" text_align="left" text_valign="center" size="156 0 100% 100%" ghost="true"/>
+<object name="coachWinProb" size="50%+60 7 50%+300 29" ghost="true">
+	<object name="coachWinProbBarBg" type="image" sprite="color: 0 0 0 150" size="0 0 100% 100%" ghost="true"/>
+	<object name="coachWinProbBar" type="image" sprite="color: 90 200 90 230" size="1 1 1 100%-1" ghost="true"/>
+	<object name="coachWinProbText" type="text" font="sans-bold-stroke-14" textcolor="white" text_align="center" text_valign="center" size="0 0 100% 100%" ghost="true"/>
 </object>
